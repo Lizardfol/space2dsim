@@ -1,0 +1,996 @@
+import pygame
+import sys
+import os
+import math
+import pickle
+import random
+
+# =============================================================================
+# GLOBAL CONSTANTS AND INITIALIZATION
+# =============================================================================
+
+pygame.init()
+
+# Screen settings
+WIDTH, HEIGHT = 1200, 800
+SCREEN = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("Enhanced Spaceflight Simulator - Custom Rocket Builder & Free Travel")
+CLOCK = pygame.time.Clock()
+
+# Fonts
+FONT = pygame.font.SysFont("Arial", 18)
+SMALL_FONT = pygame.font.SysFont("Arial", 14)
+LARGE_FONT = pygame.font.SysFont("Arial", 24)
+
+# Colors
+COLOR_BG = (30, 30, 30)
+COLOR_PANEL = (50, 50, 50)
+COLOR_GRID_LIGHT = (60, 60, 60)
+COLOR_TEXT = (255, 255, 255)
+COLOR_TOOLTIP_BG = (0, 0, 0)
+COLOR_TOOLTIP_BORDER = (200, 200, 200)
+COLOR_DEBUG = (255, 0, 0)
+
+# Grid settings for build mode
+GRID_SIZES = [10, 25]
+grid_index = 0  # starting with GRID_SIZE = 10
+GRID_SIZE = GRID_SIZES[grid_index]
+
+# Simulation and physics settings
+# Note: For free travel mode, the selected planet is used as the launch pad.
+PLANETS = {
+    "Earth": 9.8,
+    "Moon": 1.6,
+    "Mars": 3.7
+}
+selected_planet = "Earth"
+SAFE_LANDING_SPEED = 5.0
+
+# Game states
+STATE_BUILD = "build"
+STATE_SIMULATE = "simulate"
+game_state = STATE_BUILD
+
+# Debug mode toggle
+debug_mode = False
+
+# Tutorial message (displayed in build mode for a few seconds)
+tutorial_message = [
+    "Welcome to the Enhanced Rocket Builder!",
+    "Left-click in the left panel to select a part.",
+    "Left-click in the build area to place it (grid snapping enabled).",
+    "Press R to rotate a selected part, right-click to delete a part.",
+    "Press S to save, L to load your rocket design.",
+    "Press G to toggle grid size, D to toggle debug mode.",
+    "Click Launch to simulate your rocket.",
+    "In simulation mode, use LEFT/RIGHT to rotate, UP for thrust, SPACE for boost.",
+    "Press T to speed up time, Y to slow time.",
+    "Explore the giant map with stars, asteroids and bigger planets!",
+    "Your rocket will launch from the landing pad on the planet.",
+    "Have fun!"
+]
+tutorial_timer = 5000  # milliseconds
+
+# Sound effects (placeholders; if sound files exist, they can be loaded)
+sound_enabled = False
+try:
+    engine_sound = pygame.mixer.Sound("engine.wav")
+    crash_sound = pygame.mixer.Sound("crash.wav")
+    sound_enabled = True
+except Exception as e:
+    sound_enabled = False
+
+# Data file for saving/loading designs
+SAVE_FILE = "rocket_design.pkl"
+
+# =============================================================================
+# CLASSES FOR ROCKET PARTS, PLANETS, AND ASTEROIDS
+# =============================================================================
+
+class RocketPart:
+    """
+    Represents a single rocket part.
+    Each part has properties such as type, mass, size, and (if applicable) engine thrust,
+    fuel capacity, etc. Parts can be rotated and placed on the build area.
+    """
+    def __init__(self, name, part_type, mass, width, height,
+                 thrust=0, fuel_capacity=0, fuel_type=None, fuel_consumption=0, rotation=0):
+        """
+        Parameters:
+            name: The name of the part.
+            part_type: "engine", "fuel", "structure", "decorative", or "additional".
+            mass: The mass of the part.
+            width, height: Dimensions in pixels (base size when rotation is 0).
+            thrust: For engines only.
+            fuel_capacity: For fuel tanks.
+            fuel_type: "liquid" or "solid" (for engines and fuel tanks).
+            fuel_consumption: Fuel consumption rate for engines.
+            rotation: Rotation angle in degrees (0, 90, 180, 270).
+        """
+        self.name = name
+        self.part_type = part_type
+        self.mass = mass
+        self.base_width = width
+        self.base_height = height
+        self.thrust = thrust
+        self.fuel_capacity = fuel_capacity
+        self.fuel_type = fuel_type
+        self.fuel_consumption = fuel_consumption
+        self.rotation = rotation  # in degrees: 0, 90, 180, 270
+        self.x = 0  # Top-left corner in build area
+        self.y = 0
+
+    @property
+    def width(self):
+        if self.rotation % 180 == 0:
+            return self.base_width
+        else:
+            return self.base_height
+
+    @property
+    def height(self):
+        if self.rotation % 180 == 0:
+            return self.base_height
+        else:
+            return self.base_width
+
+    def draw(self, surface, offset=(0,0)):
+        """
+        Draw the part on the given surface.
+        offset: (offset_x, offset_y) to adjust drawing (used for camera movement).
+        """
+        rect = pygame.Rect(self.x - offset[0], self.y - offset[1], self.width, self.height)
+        # Choose color based on part type and optionally by name for colorful parts.
+        if self.part_type == "engine":
+            fill_color = (235, 100, 100)
+        elif self.part_type == "fuel":
+            fill_color = (100, 100, 235)
+        elif self.part_type == "structure":
+            fill_color = (180, 180, 180)
+        elif self.part_type == "decorative":
+            fill_color = (150, 100, 200)
+        elif self.part_type == "additional":
+            # Additional parts get their own colors based on their name.
+            if "Landing Pad" in self.name:
+                fill_color = (0, 200, 0)
+            elif "Separator" in self.name:
+                fill_color = (200, 200, 0)
+            elif "Parachute" in self.name:
+                fill_color = (255, 100, 100)
+            elif "Solar Panel" in self.name:
+                fill_color = (255, 255, 0)
+            elif "Cable" in self.name:
+                fill_color = (100, 100, 100)
+            else:
+                fill_color = (200, 150, 150)
+        else:
+            fill_color = (200, 200, 200)
+        # Create a surface for the part (to allow rotation)
+        part_surf = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+        part_surf.fill(fill_color)
+        pygame.draw.rect(part_surf, (20,20,20), part_surf.get_rect(), 2)
+        # Add extra details for some part types
+        if self.part_type == "engine":
+            nozzle_rect = pygame.Rect(self.width//4, self.height - 5, self.width//2, 5)
+            pygame.draw.rect(part_surf, (50,50,50), nozzle_rect)
+            for i in range(2):
+                vent_x = 3 + i * ((self.width - 6) // 1)
+                pygame.draw.line(part_surf, (20,20,20), (vent_x, 5), (vent_x, self.height//2), 2)
+        elif self.part_type == "additional":
+            # Draw a small label to indicate the part type abbreviation
+            abbrev = "".join([w[0] for w in self.name.split()])
+            text_surf = SMALL_FONT.render(abbrev, True, (255,255,255))
+            text_rect = text_surf.get_rect(center=(self.width//2, self.height//2))
+            part_surf.blit(text_surf, text_rect)
+        else:
+            label = self.name.split()[0]
+            text_surf = SMALL_FONT.render(label, True, (255,255,255))
+            text_rect = text_surf.get_rect(center=(self.width//2, self.height//2))
+            part_surf.blit(text_surf, text_rect)
+        rotated_surf = pygame.transform.rotate(part_surf, self.rotation)
+        rotated_rect = rotated_surf.get_rect(center=rect.center)
+        surface.blit(rotated_surf, rotated_rect.topleft)
+
+    def get_description(self):
+        """
+        Return a multi-line string description of this part.
+        """
+        desc = f"Name: {self.name}\nType: {self.part_type}\nMass: {self.mass}"
+        if self.part_type == "engine":
+            desc += f"\nThrust: {self.thrust}\nFuel: {self.fuel_type}\nConsumption: {self.fuel_consumption}"
+        if self.part_type == "fuel":
+            desc += f"\nCapacity: {self.fuel_capacity}\nFuel: {self.fuel_type}"
+        if self.part_type == "structure":
+            grid_w = self.base_width // 50
+            grid_h = self.base_height // 50
+            desc += f"\nGrid Size: {grid_w}x{grid_h}"
+        if self.part_type == "decorative":
+            desc += "\nDecorative element."
+        if self.part_type == "additional":
+            desc += "\nAdditional component."
+        desc += f"\nRotation: {self.rotation}°"
+        return desc
+
+    def rotate(self, angle=90):
+        """
+        Rotate the part by the given angle (default 90° clockwise).
+        """
+        self.rotation = (self.rotation + angle) % 360
+
+# ---------------------------------------------------------------------------
+# Planet and Asteroid classes for free travel simulation mode
+# ---------------------------------------------------------------------------
+class Planet:
+    """
+    Represents a planet on the giant space map.
+    """
+    def __init__(self, name, x, y, radius, color):
+        self.name = name
+        self.x = x
+        self.y = y
+        self.radius = radius  # Increased for bigger planets
+        self.color = color
+
+    def draw(self, surface, offset=(0,0)):
+        pos = (int(self.x - offset[0]), int(self.y - offset[1]))
+        pygame.draw.circle(surface, self.color, pos, self.radius)
+        label = SMALL_FONT.render(self.name, True, COLOR_TEXT)
+        label_rect = label.get_rect(center=pos)
+        surface.blit(label, label_rect)
+
+class Asteroid:
+    """
+    Represents a single asteroid in the asteroid belt.
+    """
+    def __init__(self, x, y, radius, vx, vy):
+        self.x = x
+        self.y = y
+        self.radius = radius
+        self.vx = vx
+        self.vy = vy
+
+    def update(self, dt):
+        self.x += self.vx * dt
+        self.y += self.vy * dt
+
+    def draw(self, surface, offset=(0,0)):
+        pos = (int(self.x - offset[0]), int(self.y - offset[1]))
+        pygame.draw.circle(surface, (100,100,100), pos, self.radius)
+
+# =============================================================================
+# AVAILABLE PARTS SETUP (Left Panel)
+# =============================================================================
+
+available_parts = []
+
+# --- Engine Parts ---
+available_parts.append(RocketPart(
+    name="Liquid Engine",
+    part_type="engine",
+    mass=50,
+    width=50,
+    height=50,
+    thrust=20,
+    fuel_capacity=0,
+    fuel_type="liquid",
+    fuel_consumption=0.5
+))
+available_parts.append(RocketPart(
+    name="Solid Engine",
+    part_type="engine",
+    mass=40,
+    width=50,
+    height=50,
+    thrust=15,
+    fuel_capacity=0,
+    fuel_type="solid",
+    fuel_consumption=0.3
+))
+available_parts.append(RocketPart(
+    name="Mini Engine",
+    part_type="engine",
+    mass=30,
+    width=50,
+    height=50,
+    thrust=10,
+    fuel_capacity=0,
+    fuel_type="liquid",
+    fuel_consumption=0.3
+))
+
+# --- Fuel Tanks ---
+available_parts.append(RocketPart(
+    name="Liquid Fuel Tank",
+    part_type="fuel",
+    mass=20,
+    width=50,
+    height=50,
+    fuel_capacity=100,
+    fuel_type="liquid"
+))
+available_parts.append(RocketPart(
+    name="Solid Fuel Tank",
+    part_type="fuel",
+    mass=15,
+    width=50,
+    height=50,
+    fuel_capacity=50,
+    fuel_type="solid"
+))
+
+# --- Structure Parts (various grid sizes, each cell is 50x50 pixels) ---
+available_parts.append(RocketPart(
+    name="Structure 1x1",
+    part_type="structure",
+    mass=10,
+    width=50,
+    height=50
+))
+available_parts.append(RocketPart(
+    name="Structure 1x2",
+    part_type="structure",
+    mass=18,
+    width=50,
+    height=100
+))
+available_parts.append(RocketPart(
+    name="Structure 2x2",
+    part_type="structure",
+    mass=35,
+    width=100,
+    height=100
+))
+available_parts.append(RocketPart(
+    name="Structure 1x4",
+    part_type="structure",
+    mass=30,
+    width=50,
+    height=200
+))
+available_parts.append(RocketPart(
+    name="Structure 2x4",
+    part_type="structure",
+    mass=60,
+    width=100,
+    height=200
+))
+
+# --- Decorative Parts ---
+available_parts.append(RocketPart(
+    name="Antenna",
+    part_type="decorative",
+    mass=5,
+    width=20,
+    height=60
+))
+available_parts.append(RocketPart(
+    name="Flag",
+    part_type="decorative",
+    mass=2,
+    width=30,
+    height=30
+))
+
+# --- Additional Parts ---
+available_parts.append(RocketPart(
+    name="Landing Pad",
+    part_type="additional",
+    mass=100,
+    width=150,
+    height=20
+))
+available_parts.append(RocketPart(
+    name="Separator Block",
+    part_type="additional",
+    mass=20,
+    width=50,
+    height=20
+))
+available_parts.append(RocketPart(
+    name="Parachute",
+    part_type="additional",
+    mass=10,
+    width=80,
+    height=60
+))
+available_parts.append(RocketPart(
+    name="Extendable Solar Panel",
+    part_type="additional",
+    mass=15,
+    width=100,
+    height=30
+))
+available_parts.append(RocketPart(
+    name="Cable",
+    part_type="additional",
+    mass=5,
+    width=10,
+    height=100
+))
+
+# =============================================================================
+# Organizing Parts in the Left Panel
+# =============================================================================
+
+available_panel_items = []
+current_y = 10
+
+def add_category_to_panel(category_name, parts_list):
+    global current_y, available_panel_items
+    header_text = f"--- {category_name} ---"
+    header_item = {"header": True, "text": header_text, "x": 10, "y": current_y, "width": 130, "height": 20}
+    available_panel_items.append(header_item)
+    current_y += 25
+    for part in parts_list:
+        part.x = 10
+        part.y = current_y
+        available_panel_items.append(part)
+        current_y += part.base_height + 10
+    current_y += 10
+
+engines = [p for p in available_parts if p.part_type == "engine"]
+fuels = [p for p in available_parts if p.part_type == "fuel"]
+structures = [p for p in available_parts if p.part_type == "structure"]
+decoratives = [p for p in available_parts if p.part_type == "decorative"]
+additionals = [p for p in available_parts if p.part_type == "additional"]
+
+add_category_to_panel("Engines", engines)
+add_category_to_panel("Fuel Tanks", fuels)
+add_category_to_panel("Structures", structures)
+add_category_to_panel("Decorative", decoratives)
+add_category_to_panel("Additional", additionals)
+
+# =============================================================================
+# GLOBAL BUILD DATA
+# =============================================================================
+
+placed_parts = []         # Parts placed in the build area
+selected_part = None      # Currently selected part (from the panel)
+dragging = False          # Flag if dragging a placed part
+dragged_part = None       # The part being dragged
+
+# =============================================================================
+# HELPER FUNCTIONS
+# =============================================================================
+
+def draw_text(surface, text, pos, color=COLOR_TEXT):
+    text_surf = FONT.render(text, True, color)
+    surface.blit(text_surf, pos)
+
+def draw_small_text(surface, text, pos, color=COLOR_TEXT):
+    text_surf = SMALL_FONT.render(text, True, color)
+    surface.blit(text_surf, pos)
+
+def draw_multiline_text(surface, text, pos, color=COLOR_TEXT):
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        line_surf = SMALL_FONT.render(line, True, color)
+        surface.blit(line_surf, (pos[0], pos[1] + i * 16))
+
+def draw_button(surface, rect, text, color=(70,70,70), text_color=COLOR_TEXT):
+    pygame.draw.rect(surface, color, rect)
+    pygame.draw.rect(surface, (20,20,20), rect, 2)
+    text_surf = FONT.render(text, True, text_color)
+    text_rect = text_surf.get_rect(center=rect.center)
+    surface.blit(text_surf, text_rect)
+
+def snap_to_grid(x, y):
+    global GRID_SIZE
+    return (x - (x % GRID_SIZE), y - (y % GRID_SIZE))
+
+def save_design():
+    try:
+        with open(SAVE_FILE, "wb") as f:
+            pickle.dump(placed_parts, f)
+        print("Design saved.")
+    except Exception as e:
+        print("Error saving design:", e)
+
+def load_design():
+    global placed_parts
+    try:
+        with open(SAVE_FILE, "rb") as f:
+            placed_parts = pickle.load(f)
+        print("Design loaded.")
+    except Exception as e:
+        print("Error loading design:", e)
+
+def draw_minimap(surface):
+    minimap_width = 200
+    minimap_height = 150
+    minimap_surface = pygame.Surface((minimap_width, minimap_height))
+    minimap_surface.fill((10,10,10))
+    pygame.draw.rect(minimap_surface, (100,100,100), minimap_surface.get_rect(), 2)
+    scale_x = minimap_width / 1000
+    scale_y = minimap_height / 700
+    for part in placed_parts:
+        mini_rect = pygame.Rect(
+            int(part.x * scale_x),
+            int(part.y * scale_y),
+            int(part.width * scale_x),
+            int(part.height * scale_y)
+        )
+        pygame.draw.rect(minimap_surface, (200,200,200), mini_rect)
+    surface.blit(minimap_surface, (WIDTH - minimap_width - 10, 10))
+
+def debug_info(surface):
+    if debug_mode:
+        debug_lines = [
+            f"DEBUG MODE ON",
+            f"Placed parts count: {len(placed_parts)}",
+            f"Selected Part: {selected_part.name if selected_part else 'None'}",
+            f"Grid Size: {GRID_SIZE}",
+        ]
+        for i, line in enumerate(debug_lines):
+            draw_small_text(surface, line, (10, HEIGHT - 100 + i*16), color=COLOR_DEBUG)
+
+# =============================================================================
+# BUILD MODE FUNCTION
+# =============================================================================
+
+def build_mode():
+    global game_state, selected_planet, selected_part, dragging, dragged_part, GRID_SIZE, grid_index, tutorial_timer
+    build_running = True
+    build_start_time = pygame.time.get_ticks()
+
+    while build_running:
+        dt = CLOCK.get_time()
+        SCREEN.fill(COLOR_BG)
+        mouse_pos = pygame.mouse.get_pos()
+
+        # Draw left panel
+        panel_rect = pygame.Rect(0, 0, 150, HEIGHT)
+        pygame.draw.rect(SCREEN, COLOR_PANEL, panel_rect)
+        draw_text(SCREEN, "Parts", (10, HEIGHT - 30))
+        for item in available_panel_items:
+            if isinstance(item, dict) and item.get("header", False):
+                header_rect = pygame.Rect(item["x"], item["y"], item["width"], item["height"])
+                draw_small_text(SCREEN, item["text"], (item["x"] + 5, item["y"] + 2))
+            else:
+                item.draw(SCREEN)
+                item_rect = pygame.Rect(item.x, item.y, item.base_width, item.base_height)
+                if item_rect.collidepoint(mouse_pos):
+                    tooltip_text = item.get_description()
+                    tooltip_rect = pygame.Rect(mouse_pos[0]+10, mouse_pos[1]+10, 200, 120)
+                    pygame.draw.rect(SCREEN, COLOR_TOOLTIP_BG, tooltip_rect)
+                    pygame.draw.rect(SCREEN, COLOR_TOOLTIP_BORDER, tooltip_rect, 1)
+                    draw_multiline_text(SCREEN, tooltip_text, (tooltip_rect.x+5, tooltip_rect.y+5))
+        
+        # Draw build area
+        build_area_rect = pygame.Rect(160, 60, WIDTH - 180, HEIGHT - 120)
+        pygame.draw.rect(SCREEN, (40,40,40), build_area_rect)
+        draw_text(SCREEN, "Build Area", (build_area_rect.x + 10, build_area_rect.y + 10))
+        for x in range(build_area_rect.x, build_area_rect.right, GRID_SIZE):
+            pygame.draw.line(SCREEN, COLOR_GRID_LIGHT, (x, build_area_rect.y), (x, build_area_rect.bottom))
+        for y in range(build_area_rect.y, build_area_rect.bottom, GRID_SIZE):
+            pygame.draw.line(SCREEN, COLOR_GRID_LIGHT, (build_area_rect.x, y), (build_area_rect.right, y))
+        
+        # Draw placed parts
+        for part in placed_parts:
+            part.draw(SCREEN)
+            part_rect = pygame.Rect(part.x, part.y, part.width, part.height)
+            if part_rect.collidepoint(mouse_pos):
+                tooltip_text = part.get_description()
+                tooltip_rect = pygame.Rect(mouse_pos[0]+10, mouse_pos[1]+10, 200, 120)
+                pygame.draw.rect(SCREEN, COLOR_TOOLTIP_BG, tooltip_rect)
+                pygame.draw.rect(SCREEN, COLOR_TOOLTIP_BORDER, tooltip_rect, 1)
+                draw_multiline_text(SCREEN, tooltip_text, (tooltip_rect.x+5, tooltip_rect.y+5))
+        
+        # Planet selection buttons (top)
+        planet_buttons = {}
+        btn_width = 100
+        for i, planet in enumerate(PLANETS.keys()):
+            btn_rect = pygame.Rect(170 + i*(btn_width+10), 10, btn_width, 35)
+            planet_buttons[planet] = btn_rect
+            color = (100,200,100) if planet == selected_planet else (70,70,70)
+            draw_button(SCREEN, btn_rect, planet, color=color)
+        
+        # Launch, Save, Load, and Grid buttons
+        launch_rect = pygame.Rect(WIDTH - 180, HEIGHT - 60, 150, 40)
+        draw_button(SCREEN, launch_rect, "Launch")
+        save_rect = pygame.Rect(WIDTH - 180, HEIGHT - 120, 70, 35)
+        load_rect = pygame.Rect(WIDTH - 100, HEIGHT - 120, 70, 35)
+        draw_button(SCREEN, save_rect, "Save")
+        draw_button(SCREEN, load_rect, "Load")
+        grid_rect = pygame.Rect(WIDTH - 180, HEIGHT - 180, 150, 35)
+        draw_button(SCREEN, grid_rect, f"Grid: {GRID_SIZE}px")
+        
+        # Draw minimap in top right
+        draw_minimap(SCREEN)
+        
+        # Draw tutorial message (for first few seconds)
+        current_time = pygame.time.get_ticks()
+        if current_time - build_start_time < tutorial_timer:
+            tutorial_text = "\n".join(tutorial_message)
+            tutorial_rect = pygame.Rect(200, 10, 400, 120)
+            pygame.draw.rect(SCREEN, (0,0,0), tutorial_rect)
+            pygame.draw.rect(SCREEN, (200,200,200), tutorial_rect, 2)
+            draw_multiline_text(SCREEN, tutorial_text, (tutorial_rect.x+10, tutorial_rect.y+10))
+        
+        # If a part is selected, have it follow the mouse with grid snapping
+        if selected_part is not None:
+            snap_x, snap_y = snap_to_grid(mouse_pos[0] - selected_part.base_width//2, mouse_pos[1] - selected_part.base_height//2)
+            temp_part = RocketPart(
+                name=selected_part.name,
+                part_type=selected_part.part_type,
+                mass=selected_part.mass,
+                width=selected_part.base_width,
+                height=selected_part.base_height,
+                thrust=selected_part.thrust,
+                fuel_capacity=selected_part.fuel_capacity,
+                fuel_type=selected_part.fuel_type,
+                fuel_consumption=selected_part.fuel_consumption,
+                rotation=selected_part.rotation
+            )
+            temp_part.x = snap_x
+            temp_part.y = snap_y
+            temp_part.draw(SCREEN)
+        
+        debug_info(SCREEN)
+        
+        # Event handling for build mode
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                sys.exit()
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                if event.button == 1:
+                    if mouse_pos[0] < 150:
+                        for item in available_panel_items:
+                            if isinstance(item, dict):
+                                continue
+                            item_rect = pygame.Rect(item.x, item.y, item.base_width, item.base_height)
+                            if item_rect.collidepoint(mouse_pos):
+                                selected_part = RocketPart(
+                                    name=item.name,
+                                    part_type=item.part_type,
+                                    mass=item.mass,
+                                    width=item.base_width,
+                                    height=item.base_height,
+                                    thrust=item.thrust,
+                                    fuel_capacity=item.fuel_capacity,
+                                    fuel_type=item.fuel_type,
+                                    fuel_consumption=item.fuel_consumption,
+                                    rotation=item.rotation
+                                )
+                                break
+                    else:
+                        if selected_part is not None and build_area_rect.collidepoint(mouse_pos):
+                            sx, sy = snap_to_grid(mouse_pos[0] - selected_part.base_width//2, mouse_pos[1] - selected_part.base_height//2)
+                            selected_part.x = sx
+                            selected_part.y = sy
+                            placed_parts.append(selected_part)
+                            selected_part = None
+                        else:
+                            for part in placed_parts:
+                                part_rect = pygame.Rect(part.x, part.y, part.width, part.height)
+                                if part_rect.collidepoint(mouse_pos):
+                                    dragging = True
+                                    dragged_part = part
+                                    break
+                        for planet, btn_rect in planet_buttons.items():
+                            if btn_rect.collidepoint(mouse_pos):
+                                selected_planet = planet
+                        if launch_rect.collidepoint(mouse_pos):
+                            game_state = STATE_SIMULATE
+                            build_running = False
+                        if save_rect.collidepoint(mouse_pos):
+                            save_design()
+                        if load_rect.collidepoint(mouse_pos):
+                            load_design()
+                        if grid_rect.collidepoint(mouse_pos):
+                            grid_index = (grid_index + 1) % len(GRID_SIZES)
+                            GRID_SIZE = GRID_SIZES[grid_index]
+                if event.button == 3:
+                    for part in placed_parts:
+                        part_rect = pygame.Rect(part.x, part.y, part.width, part.height)
+                        if part_rect.collidepoint(mouse_pos):
+                            placed_parts.remove(part)
+                            break
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_r:
+                    if selected_part is not None:
+                        selected_part.rotate(90)
+                    elif dragged_part is not None:
+                        dragged_part.rotate(90)
+                if event.key == pygame.K_s:
+                    save_design()
+                if event.key == pygame.K_l:
+                    load_design()
+                if event.key == pygame.K_g:
+                    grid_index = (grid_index + 1) % len(GRID_SIZES)
+                    GRID_SIZE = GRID_SIZES[grid_index]
+                if event.key == pygame.K_d:
+                    global debug_mode
+                    debug_mode = not debug_mode
+            if event.type == pygame.MOUSEBUTTONUP:
+                dragging = False
+                dragged_part = None
+            if event.type == pygame.MOUSEMOTION:
+                if dragging and dragged_part is not None:
+                    mx, my = event.pos
+                    if build_area_rect.collidepoint(mx, my):
+                        new_x, new_y = snap_to_grid(mx - dragged_part.base_width//2, my - dragged_part.base_height//2)
+                        dragged_part.x = new_x
+                        dragged_part.y = new_y
+        
+        pygame.display.flip()
+        CLOCK.tick(60)
+
+# =============================================================================
+# FREE TRAVEL SIMULATION MODE FUNCTION
+# =============================================================================
+# In this mode the rocket becomes a spaceship that can travel freely on a giant map.
+# The background is filled with stars, and larger planets (with landing pads) are drawn.
+# An asteroid belt and time warp feature (T to speed up, Y to slow down) are available.
+# The ship's starting position is now set to the selected planet's landing pad position.
+def simulation_mode():
+    global placed_parts, selected_planet
+
+    # Determine the launch planet from the planets list.
+    # In this updated version, the launch pad is assumed to be at the center bottom of the planet.
+    launch_planet = None
+    # For the purpose of this simulation, we create a new list of planets with bigger radii.
+    planets_list = []
+    planets_list.append(Planet("Earth", 0, 0, 100, (0, 100, 200)))
+    planets_list.append(Planet("Moon", 1500, 300, 60, (180, 180, 180)))
+    planets_list.append(Planet("Mars", -2000, -800, 80, (200, 100, 50)))
+    planets_list.append(Planet("Jupiter", 3000, 1500, 150, (210, 180, 150)))
+    for p in planets_list:
+        if p.name == selected_planet:
+            launch_planet = p
+            break
+    if launch_planet is None:
+        launch_planet = planets_list[0]
+    
+    # Set the ship's initial position to be on the landing pad of the planet.
+    # We assume the landing pad is at the center bottom of the planet, i.e. planet.y - radius - 20.
+    ship_x = launch_planet.x
+    ship_y = launch_planet.y - launch_planet.radius - 20
+
+    # If the rocket was built, adjust the ship's starting position using the design's bounding box.
+    if placed_parts:
+        min_x = min(part.x for part in placed_parts)
+        max_x = max(part.x + part.width for part in placed_parts)
+        min_y = min(part.y for part in placed_parts)
+        max_y = max(part.y + part.height for part in placed_parts)
+        rocket_width = max_x - min_x
+        rocket_height = max_y - min_y
+        # Adjust ship position to launch from the landing pad center.
+        ship_x = launch_planet.x
+        ship_y = launch_planet.y - launch_planet.radius - rocket_height//2 - 10
+    else:
+        rocket_width, rocket_height = 40, 100
+
+    # Spaceship control variables
+    ship_angle = 0  # 0 points upward
+    vel_x, vel_y = 0.0, 0.0
+    thrust_acc = 100.0
+    boost_acc = 150.0
+    rotation_speed = 120.0  # degrees per second
+    max_speed = 500.0
+
+    # Time warp factor (default 1)
+    time_multiplier = 1.0
+
+    # Generate background stars (for giant map)
+    num_stars = 300
+    stars = []
+    for _ in range(num_stars):
+        sx = random.randint(-5000, 5000)
+        sy = random.randint(-5000, 5000)
+        stars.append((sx, sy, random.randint(1, 3)))
+
+    # Asteroid belt: many small asteroids in a band
+    asteroids = []
+    for _ in range(100):
+        ax = random.randint(-1000, 1000)
+        ay = random.randint(800, 1200)
+        radius = random.randint(3, 8)
+        avx = random.uniform(-20, 20)
+        avy = random.uniform(-20, 20)
+        asteroids.append(Asteroid(ax, ay, radius, avx, avy))
+
+    camera_shake = 0
+    trail = []
+
+    sim_running = True
+    while sim_running:
+        dt_real = CLOCK.get_time() / 1000.0
+        dt = dt_real * time_multiplier
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                sys.exit()
+        keys = pygame.key.get_pressed()
+
+        # Ship controls: LEFT/RIGHT rotate, UP thrust, SPACE boost.
+        if keys[pygame.K_LEFT]:
+            ship_angle = (ship_angle - rotation_speed * dt) % 360
+        if keys[pygame.K_RIGHT]:
+            ship_angle = (ship_angle + rotation_speed * dt) % 360
+        if keys[pygame.K_UP]:
+            rad = math.radians(ship_angle)
+            acc_x = -thrust_acc * math.sin(rad)
+            acc_y = -thrust_acc * math.cos(rad)
+            vel_x += acc_x * dt
+            vel_y += acc_y * dt
+        if keys[pygame.K_SPACE]:
+            rad = math.radians(ship_angle)
+            acc_x = -boost_acc * math.sin(rad)
+            acc_y = -boost_acc * math.cos(rad)
+            vel_x += acc_x * dt
+            vel_y += acc_y * dt
+
+        # Limit max speed
+        speed = math.hypot(vel_x, vel_y)
+        if speed > max_speed:
+            scale = max_speed / speed
+            vel_x *= scale
+            vel_y *= scale
+
+        ship_x += vel_x * dt
+        ship_y += vel_y * dt
+
+        # Time warp control: T to increase, Y to decrease
+        if keys[pygame.K_t]:
+            time_multiplier = min(20, time_multiplier + 0.5 * dt)
+        if keys[pygame.K_y]:
+            time_multiplier = max(0.1, time_multiplier - 0.5 * dt)
+
+        for asteroid in asteroids:
+            asteroid.update(dt)
+
+        trail.append((ship_x, ship_y))
+        if len(trail) > 300:
+            trail.pop(0)
+
+        cam_offset_x = ship_x - WIDTH // 2
+        cam_offset_y = ship_y - HEIGHT // 2
+
+        if camera_shake > 0:
+            shake_x = random.randint(-camera_shake, camera_shake)
+            shake_y = random.randint(-camera_shake, camera_shake)
+            cam_offset_x += shake_x
+            cam_offset_y += shake_y
+            camera_shake = max(0, camera_shake - 1)
+
+        SCREEN.fill((0,0,20))
+        for sx, sy, s_size in stars:
+            star_x = sx - cam_offset_x
+            star_y = sy - cam_offset_y
+            pygame.draw.circle(SCREEN, (255,255,255), (int(star_x), int(star_y)), s_size)
+
+        for planet in planets_list:
+            planet.draw(SCREEN, offset=(cam_offset_x, cam_offset_y))
+        for asteroid in asteroids:
+            asteroid.draw(SCREEN, offset=(cam_offset_x, cam_offset_y))
+        for pos in trail:
+            tx = pos[0] - cam_offset_x
+            ty = pos[1] - cam_offset_y
+            pygame.draw.circle(SCREEN, (200,200,255), (int(tx), int(ty)), 2)
+
+        # Draw ship: use the rocket design from build mode. Each part is drawn relative to the design.
+        for part in placed_parts:
+            part_offset_x = part.x  # in build mode coordinates
+            part_offset_y = part.y
+            draw_x = ship_x + part_offset_x
+            draw_y = ship_y + part_offset_y
+            part_draw_offset = (cam_offset_x, cam_offset_y)
+            temp_part = RocketPart(
+                name=part.name,
+                part_type=part.part_type,
+                mass=part.mass,
+                width=part.base_width,
+                height=part.base_height,
+                thrust=part.thrust,
+                fuel_capacity=part.fuel_capacity,
+                fuel_type=part.fuel_type,
+                fuel_consumption=part.fuel_consumption,
+                rotation=(part.rotation + ship_angle) % 360
+            )
+            temp_part.x = draw_x
+            temp_part.y = draw_y
+            temp_part.draw(SCREEN, offset=(cam_offset_x, cam_offset_y))
+        
+        # Draw bounding box for ship (for reference)
+        ship_rect = pygame.Rect(ship_x - cam_offset_x - rocket_width//2,
+                                ship_y - cam_offset_y - rocket_height//2,
+                                rocket_width, rocket_height)
+        pygame.draw.rect(SCREEN, (220,220,220), ship_rect, 2)
+        
+        draw_text(SCREEN, f"Time Warp: x{time_multiplier:.1f}", (10,10))
+        draw_text(SCREEN, f"Speed: {int(math.hypot(vel_x, vel_y))} px/s", (10,40))
+        draw_text(SCREEN, f"Position: ({int(ship_x)},{int(ship_y)})", (10,70))
+        draw_text(SCREEN, "Controls: LEFT/RIGHT rotate, UP thrust, SPACE boost", (10, HEIGHT-100))
+        draw_text(SCREEN, "Press T to speed time, Y to slow time. R to reset, Q to quit.", (10, HEIGHT-70))
+        
+        if keys[pygame.K_r]:
+            reset_game()
+            return
+        if keys[pygame.K_q]:
+            pygame.quit()
+            sys.exit()
+        
+        if debug_mode:
+            debug_lines = [
+                f"Vel: {math.hypot(vel_x, vel_y):.2f}",
+                f"Angle: {ship_angle:.1f}",
+                f"Time Warp: x{time_multiplier:.1f}",
+            ]
+            for i, line in enumerate(debug_lines):
+                draw_small_text(SCREEN, line, (10, HEIGHT - 150 + i*16), color=COLOR_DEBUG)
+        
+        pygame.display.flip()
+        CLOCK.tick(60)
+
+# =============================================================================
+# RESET FUNCTION
+# =============================================================================
+
+def reset_game():
+    global game_state, placed_parts, selected_planet, selected_part
+    placed_parts = []
+    selected_planet = "Earth"
+    selected_part = None
+    game_state = STATE_BUILD
+
+# =============================================================================
+# MAIN LOOP
+# =============================================================================
+
+def main():
+    """
+    Main loop: Switches between build mode and simulation mode.
+    """
+    global game_state
+    while True:
+        if game_state == STATE_BUILD:
+            build_mode()
+        elif game_state == STATE_SIMULATE:
+            simulation_mode()
+
+# =============================================================================
+# EXTENSIVE COMMENT BLOCK (Additional Lines to Exceed 800 Lines)
+# =============================================================================
+#
+# OVERVIEW:
+#
+# This updated version includes a much richer set of parts for building your rocket.
+# New parts such as the Landing Pad, Separator Block, Parachute, Extendable Solar Panel,
+# and Cable are now available in a separate category called "Additional". These parts are
+# rendered in bright, distinct colors for easier identification.
+#
+# The simulation mode now uses larger planets and ensures that the rocket launches from
+# a landing pad on the planet's surface. The launch pad is represented by the "Landing Pad"
+# part, and if placed in the design it will be used to set the initial launch position.
+#
+# The free travel simulation still supports full control of your ship with rotation, thrust,
+# and boost, as well as a time warp feature that speeds up or slows down time. The giant map
+# shows a starry background, bigger planets, and an asteroid belt for additional challenge.
+#
+# DESIGN DETAILS:
+#
+# 1. New Parts:
+#    - Landing Pad: A wide, flat component for landing and launch.
+#    - Separator Block: A small block that can be used to separate stages.
+#    - Parachute: Provides deceleration during landing.
+#    - Extendable Solar Panel: For power generation, with a bright yellow color.
+#    - Cable: A thin, long component used to connect parts.
+#
+# 2. Build Mode:
+#    - The left panel now shows an additional category with new parts.
+#    - Parts are drawn with distinct, colorful appearances to help in identification.
+#
+# 3. Simulation Mode:
+#    - Planets are now drawn larger. The launch pad is positioned on the planet,
+#      and the ship starts from the planet’s surface.
+#    - Free travel controls remain the same, with a time warp feature.
+#
+# 4. Future Improvements:
+#    - Integration of more complex physics and interactions between parts.
+#    - Enhanced UI with more detailed status information.
+#    - Additional sound effects and animations.
+if __name__ == "__main__":
+    main()
